@@ -1,6 +1,7 @@
 package vcodereader
 
 import (
+	"fmt"
 	"github.com/otiai10/gosseract"
 	"image"
 	"image/color"
@@ -28,6 +29,7 @@ type VcodeReader struct {
 	xy_arr_out   []*Xy       //外圈偏移量
 	m            image.Image
 	use_client   bool
+	need_rev     bool //是否灰度反转
 }
 
 //第一圈和第二圈偏移量
@@ -53,7 +55,7 @@ func init() {
 	}
 }
 
-func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jump int, save_clear_file_name_prefix string, use_client bool) *VcodeReader {
+func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jump int, save_clear_file_name_prefix string, use_client bool, need_rev bool) *VcodeReader {
 	vr := &VcodeReader{
 		lineInfos:    []*LineInfo{},
 		width:        0,
@@ -65,6 +67,7 @@ func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jum
 		check_round2: check_round2,
 		xy_arr_out:   []*Xy{},
 		use_client:   use_client,
+		need_rev:     need_rev,
 	}
 	suffix := file_name[strings.LastIndex(file_name, ".")+1:]
 	switch suffix {
@@ -96,7 +99,11 @@ func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jum
 }
 
 func NewVcodeReaderDefault(file_name string) *VcodeReader {
-	return NewVcodeReader(file_name, true, 3, 6, "clear_", false)
+	return NewVcodeReader(file_name, true, 3, 6, "clear_", false, false)
+}
+
+func (this *VcodeReader) SetNeedRev(need_rev bool) {
+	this.need_rev = need_rev
 }
 
 func (this *VcodeReader) Read() (string, error) {
@@ -138,6 +145,7 @@ func (this *VcodeReader) Read() (string, error) {
 		this.lineInfos = append(this.lineInfos, lineInfoNow2)
 		this.tracePoints(2, lineInfoNow2, nil, 0, 0, 0)
 	}
+	fmt.Println("40%")
 	for y := 0; y < this.height; y++ {
 		xy := NewXy(0, y)
 		lineInfoNow := NewLineInfo(xy)
@@ -149,16 +157,19 @@ func (this *VcodeReader) Read() (string, error) {
 		this.lineInfos = append(this.lineInfos, lineInfoNow2)
 		this.tracePoints(-2, lineInfoNow2, nil, 0, 0, 0)
 	}
+	fmt.Println("80%")
 	rgba := image.NewRGBA(image.Rect(0, 0, this.width, this.height))
 	//灰度化
 	//灰度反转 *
-	//二值化
 	sum_blue := uint32(0)
 	sum_count := uint32(0)
 	for y := 0; y < this.height; y++ {
 		for x := 0; x < this.width; x++ {
 			r, g, b, a := this.m.At(x, y).RGBA()
 			r, g, b, a = r>>8, g>>8, b>>8, a>>8
+			if this.need_rev {
+				r, g, b = 255-r, 255-g, 255-b
+			}
 			rgba.Set(x, y, color.NRGBA{uint8(r * 30 / 100), uint8(g * 59 / 100), uint8(b * 11 / 100), uint8(a)})
 			//rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(a)})
 			//fmt.Println("OLD:", r, ",", g, ",", b, ",", a)
@@ -169,13 +180,13 @@ func (this *VcodeReader) Read() (string, error) {
 			//fmt.Println("NEW:", r2, ",", g2, ",", b2, ",", a2)
 		}
 	}
+	//二值化
 	avg_blue := sum_blue / sum_count
 	for y := 0; y < this.height; y++ {
 		for x := 0; x < this.width; x++ {
 			_, _, b, a := rgba.At(x, y).RGBA()
 			a = a >> 8
-			//			fmt.Println("? ", b, ",", avg_blue)
-			if b < avg_blue {
+			if b > avg_blue {
 				rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(a)})
 			} else {
 				rgba.Set(x, y, color.NRGBA{uint8(0), uint8(0), uint8(0), uint8(a)})
@@ -201,7 +212,7 @@ func (this *VcodeReader) Read() (string, error) {
 					}
 				}
 				if need_clear {
-					rgba.Set(x, y, color.NRGBA{uint8(0), uint8(0), uint8(0), uint8(0)})
+					rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
 				}
 			}
 		}
@@ -210,7 +221,7 @@ func (this *VcodeReader) Read() (string, error) {
 	for _, info := range this.lineInfos {
 		if info.LenPoints() >= this.max_linked {
 			for _, p := range info.points {
-				rgba.Set(p.x, p.y, color.NRGBA{uint8(0), uint8(0), uint8(0), uint8(0)})
+				rgba.Set(p.x, p.y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
 			}
 		}
 	}
@@ -248,10 +259,9 @@ func (this *VcodeReader) tracePoints(direction int, lineInfo *LineInfo, nowXy *X
 		nowXy = lineInfo.from
 		r, g, b, _ = m.At(nowXy.x, nowXy.y).RGBA()
 	}
-	//fmt.Println("NOW:", nowXy.x, ",", nowXy.y, "D:", direction)
-	if r == 0 && g == 0 && b == 0 {
-		return true
-	}
+	// if r == 65535 && g == 65535 && b == 65535 {
+	// 	return true
+	// }
 	lineInfo.points = append(lineInfo.points, nowXy)
 	lineInfoHere := lineInfo.Copy()
 	for _, xy := range xy_arr_round1 {
