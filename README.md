@@ -10,12 +10,34 @@ A golang tool to read verify code.
     - `go get github.com/jesusslim/vcodereader`
 5. run the example:vcodereader/example/example.go
 
-Only support png this version V1.0.
-
 # 如何使用
 使用步骤参考上述 
 依赖于tesseract-ocr、otiai10/gosseract以及go运行环境
 上述依赖安装完毕后 使用go get命令获取此项目代码
 运行example文件夹下例子
 
-目前V1.0版本仅支持png格式.
+# Example code:
+
+	package main
+
+	import (
+		"fmt"
+		"github.com/jesusslim/slimgo/utils"
+		"github.com/jesusslim/vcodereader"
+		"time"
+	)
+
+	func main() {
+		fmt.Println(utils.TimeFormat(time.Now(), "H:i:s"))
+		//file_name := "test.png"
+		//vr := vcodereader.NewVcodeReaderDefault(file_name)
+		vr := vcodereader.NewVcodeReaderDefaultFromUrl("yoururl")
+		//vr.SetNeedRev(true)
+		r, err := vr.Read()
+		if err != nil {
+			fmt.Println(err.Error())
+		} else {
+			fmt.Println(r)
+		}
+		fmt.Println(utils.TimeFormat(time.Now(), "H:i:s"))
+	}
