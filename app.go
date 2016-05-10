@@ -1,14 +1,19 @@
 package vcodereader
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/otiai10/gosseract"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"io"
+	"io/ioutil"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -29,7 +34,8 @@ type VcodeReader struct {
 	xy_arr_out   []*Xy       //外圈偏移量
 	m            image.Image
 	use_client   bool
-	need_rev     bool //是否灰度反转
+	need_rev     bool           //是否灰度反转
+	visited      map[string]int //坐标点访问次数
 }
 
 //第一圈和第二圈偏移量
@@ -68,12 +74,13 @@ func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jum
 		xy_arr_out:   []*Xy{},
 		use_client:   use_client,
 		need_rev:     need_rev,
+		visited:      map[string]int{},
 	}
 	suffix := file_name[strings.LastIndex(file_name, ".")+1:]
 	switch suffix {
 	case "jpg", "jpeg":
 		vr.file_type = TYPE_JPEG
-		panic("This File is not support.")
+		//panic("This File is not support.")
 		break
 	case "png":
 		vr.file_type = TYPE_PNG
@@ -98,12 +105,36 @@ func NewVcodeReader(file_name string, check_round2 bool, max_linked int, max_jum
 	return vr
 }
 
+func NewVcodeReaderDefaultFromUrl(url string) *VcodeReader {
+	file_name, err := GetImgFromUrl(url)
+	if err != nil {
+		panic(err.Error())
+	}
+	return NewVcodeReader(file_name, true, 3, 6, "clear_", false, false)
+}
+
 func NewVcodeReaderDefault(file_name string) *VcodeReader {
 	return NewVcodeReader(file_name, true, 3, 6, "clear_", false, false)
 }
 
 func (this *VcodeReader) SetNeedRev(need_rev bool) {
 	this.need_rev = need_rev
+}
+
+func (this *VcodeReader) GetXyVisited(x, y int) int {
+	v, ok := this.visited[string(x)+","+string(y)]
+	if ok {
+		return v
+	} else {
+		return 0
+	}
+}
+
+func (this *VcodeReader) IncXyVisited(x, y int) int {
+	v := this.GetXyVisited(x, y)
+	v++
+	this.visited[string(x)+","+string(y)] = v
+	return v
 }
 
 func (this *VcodeReader) Read() (string, error) {
@@ -171,25 +202,30 @@ func (this *VcodeReader) Read() (string, error) {
 				r, g, b = 255-r, 255-g, 255-b
 			}
 			rgba.Set(x, y, color.NRGBA{uint8(r * 30 / 100), uint8(g * 59 / 100), uint8(b * 11 / 100), uint8(a)})
-			//rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(a)})
-			//fmt.Println("OLD:", r, ",", g, ",", b, ",", a)
-			_, _, b2, _ := rgba.At(x, y).RGBA()
-			sum_blue += b2
+			r2, g2, b2, _ := rgba.At(x, y).RGBA()
+			sum_blue += r2 + g2 + b2
 			sum_count++
-			//r2, g2, b2, a2 = r2>>8, g2>>8, b2>>8, a2>>8
-			//fmt.Println("NEW:", r2, ",", g2, ",", b2, ",", a2)
 		}
 	}
 	//二值化
 	avg_blue := sum_blue / sum_count
 	for y := 0; y < this.height; y++ {
 		for x := 0; x < this.width; x++ {
-			_, _, b, a := rgba.At(x, y).RGBA()
+			r, g, b, a := rgba.At(x, y).RGBA()
 			a = a >> 8
-			if b > avg_blue {
-				rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(a)})
+			sum := r + g + b
+			if sum > avg_blue {
+				rgba.Set(x, y, color.NRGBA{uint8(0), uint8(0), uint8(0), uint8(255)})
 			} else {
-				rgba.Set(x, y, color.NRGBA{uint8(0), uint8(0), uint8(0), uint8(a)})
+				rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
+			}
+		}
+	}
+	//去除干扰线
+	for _, info := range this.lineInfos {
+		if info.LenPoints() >= this.max_linked {
+			for _, p := range info.points {
+				rgba.Set(p.x, p.y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
 			}
 		}
 	}
@@ -201,12 +237,12 @@ func (this *VcodeReader) Read() (string, error) {
 	xy_arr[3] = Xy{0, 1}
 	for y := 0; y < this.height; y++ {
 		for x := 0; x < this.width; x++ {
-			_, _, _, a := rgba.At(x, y).RGBA()
-			if a > 0 {
+			r, g, b, a := rgba.At(x, y).RGBA()
+			if a > 0 && (r+g+b) == 0 {
 				need_clear := true
 				for _, tmp := range xy_arr {
-					_, _, _, a_t := rgba.At(x+tmp.x, y+tmp.y).RGBA()
-					if a_t > 0 {
+					r2, g2, b2, a2 := rgba.At(x+tmp.x, y+tmp.y).RGBA()
+					if a2 > 0 && (r2+g2+b2) == 0 {
 						need_clear = false
 						break
 					}
@@ -214,14 +250,6 @@ func (this *VcodeReader) Read() (string, error) {
 				if need_clear {
 					rgba.Set(x, y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
 				}
-			}
-		}
-	}
-	//去除干扰线
-	for _, info := range this.lineInfos {
-		if info.LenPoints() >= this.max_linked {
-			for _, p := range info.points {
-				rgba.Set(p.x, p.y, color.NRGBA{uint8(255), uint8(255), uint8(255), uint8(255)})
 			}
 		}
 	}
@@ -259,6 +287,12 @@ func (this *VcodeReader) tracePoints(direction int, lineInfo *LineInfo, nowXy *X
 		nowXy = lineInfo.from
 		r, g, b, _ = m.At(nowXy.x, nowXy.y).RGBA()
 	}
+	v := this.GetXyVisited(nowXy.x, nowXy.y)
+	if v > 2 {
+		//重复访问坐标限制两次
+		return true
+	}
+	this.IncXyVisited(nowXy.x, nowXy.y)
 	// if r == 65535 && g == 65535 && b == 65535 {
 	// 	return true
 	// }
@@ -394,4 +428,32 @@ func (this *VcodeReader) tracePoints(direction int, lineInfo *LineInfo, nowXy *X
 		}
 	}
 	return true
+}
+
+func GetImgFromUrl(url string) (string, error) {
+	path := strings.Split(url, "/")
+	var name string
+	if len(path) > 1 {
+		name = fmt.Sprintf("%d", time.Now().Unix()) + "_" + path[len(path)-1]
+		index := strings.LastIndex(name, ".")
+		if index == -1 {
+			name = name + ".png"
+		}
+	}
+	out, err := os.Create(name)
+	defer out.Close()
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.Get(url)
+	defer resp.Body.Close()
+	if err != nil {
+		return "", err
+	}
+	pix, err := ioutil.ReadAll(resp.Body)
+	_, err = io.Copy(out, bytes.NewReader(pix))
+	if err != nil {
+		return "", err
+	}
+	return name, nil
 }
